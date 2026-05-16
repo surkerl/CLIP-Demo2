@@ -19,6 +19,7 @@ model:
   head: caem
   clip_model: /newSSD/home/YGY/pretrained/openai/clip-vit-base-patch16
   evidence_dim: 768
+  evidence_scale: 1.0
   dropout: 0.3
 
 train:

@@ -70,11 +70,12 @@ class CAEMBaseline(nn.Module):
     - 对每个类别用 class query 与所有 patch token 计算 attention
     - 加权求和得到 evidence token，经 class-specific weight 得到 evidence_logits
     - cls_token 经 global classifier 得到 global_logits
-    - final_logits = global_logits + evidence_logits (global residual)
+    - final_logits = global_logits + evidence_scale * evidence_logits
     """
 
     def __init__(self, clip_model_name="openai/clip-vit-base-patch16",
-                 num_classes=6, evidence_dim=768, dropout=0.3):
+                 num_classes=6, evidence_dim=768, dropout=0.3,
+                 evidence_scale=1.0):
         super().__init__()
         self.vision_encoder = CLIPVisionModel.from_pretrained(clip_model_name)
 
@@ -84,6 +85,7 @@ class CAEMBaseline(nn.Module):
         hidden_dim = self.vision_encoder.config.hidden_size  # ViT-B/16 => 768
         self.num_classes = num_classes
         self.evidence_dim = evidence_dim
+        self.evidence_scale = evidence_scale
         self.scale = evidence_dim ** 0.5
 
         # 可学习 class queries [C, D]
@@ -127,8 +129,8 @@ class CAEMBaseline(nn.Module):
         # Global logits (residual)
         global_logits = self.global_classifier(cls_token)
 
-        # Final = global + evidence
-        final_logits = global_logits + evidence_logits
+        # Final = global + evidence_scale * evidence
+        final_logits = global_logits + self.evidence_scale * evidence_logits
 
         if return_evidence_maps:
             return final_logits, evidence_maps, global_logits, evidence_logits
@@ -160,6 +162,7 @@ def build_model(config):
             num_classes=num_classes,
             evidence_dim=model_cfg.get("evidence_dim", 768),
             dropout=model_cfg.get("dropout", 0.3),
+            evidence_scale=model_cfg.get("evidence_scale", 1.0),
         )
     else:
         raise ValueError(f"未知的分类头类型: {head}，可选值为 linear / mlp / caem")
