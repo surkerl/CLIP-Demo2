@@ -1,0 +1,30 @@
+# CEDC-CLIP Baseline Configuration
+# 可通过 CLI 参数覆盖: --data-root, --head, --epochs, --batch-size, --lr, --experiment-name
+
+experiment:
+  name: baseline
+  seed: 42
+
+data:
+  name: EmotionROI
+  data_root: /newSSD/home/YGY/workSpace/other/data/VEA_CLIP/raw/EmotionROI/extracted/EmotionROI
+  split_dir: training_testing_split
+  train_file: training.txt
+  test_file: testing.txt
+  # 类别顺序固定
+  classes: [anger, disgust, fear, joy, sadness, surprise]
+  image_size: 224
+
+model:
+  clip_model: /newSSD/home/YGY/pretrained/openai/clip-vit-base-patch16
+  head: linear  # linear 或 mlp
+  mlp_hidden: 512
+  dropout: 0.3
+
+train:
+  epochs: 80
+  batch_size: 64
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-4
+  num_workers: 4
+  device: cuda
