@@ -13,7 +13,7 @@ def load_config():
     parser.add_argument("--data-root", type=str, default=None,
                         help="覆盖数据集根路径")
     parser.add_argument("--head", type=str, default=None,
-                        choices=["linear", "mlp"],
+                        choices=["linear", "mlp", "caem"],
                         help="覆盖分类头类型")
     parser.add_argument("--epochs", type=int, default=None,
                         help="覆盖训练 epoch 数")

@@ -1,12 +1,14 @@
 """训练循环。管理训练、评估、checkpoint 保存和日志输出。"""
 
 import os
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import transforms
 from tqdm import tqdm
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from .dataset import EmotionROIDataset
 from .models import build_model
@@ -67,17 +69,31 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
 
 @torch.no_grad()
 def evaluate(model, dataloader, criterion, device):
-    """单 epoch 评估，返回 loss 和全部预测/标签。"""
+    """单 epoch 评估。返回 (loss, all_labels, all_preds, extra_metrics)。
+
+    对于 CAEM 模型，extra_metrics 包含 global_logits_norm 和 evidence_logits_norm。
+    """
     model.eval()
     total_loss = 0.0
     all_preds = []
     all_labels = []
+    global_norms = []
+    evidence_norms = []
+    is_caem = hasattr(model, "class_queries")
 
     for images, labels in tqdm(dataloader, desc="Evaluating", leave=False):
         images = images.to(device)
         labels = labels.to(device)
 
-        logits = model(images)
+        if is_caem:
+            logits, ev_maps, glb_logits, evd_logits = model(
+                images, return_evidence_maps=True,
+            )
+            global_norms.append(glb_logits.norm(dim=-1).mean().item())
+            evidence_norms.append(evd_logits.norm(dim=-1).mean().item())
+        else:
+            logits = model(images)
+
         loss = criterion(logits, labels)
 
         total_loss += loss.item()
@@ -86,7 +102,12 @@ def evaluate(model, dataloader, criterion, device):
         all_labels.extend(labels.cpu().tolist())
 
     avg_loss = total_loss / len(dataloader)
-    return avg_loss, all_labels, all_preds
+    extra = {}
+    if is_caem:
+        extra["global_logits_norm"] = sum(global_norms) / len(global_norms)
+        extra["evidence_logits_norm"] = sum(evidence_norms) / len(evidence_norms)
+
+    return avg_loss, all_labels, all_preds, extra
 
 
 def train(config):
@@ -170,7 +191,7 @@ def train(config):
 
     for epoch in range(1, train_cfg["epochs"] + 1):
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-        test_loss, all_labels, all_preds = evaluate(model, test_loader, criterion, device)
+        test_loss, all_labels, all_preds, extra = evaluate(model, test_loader, criterion, device)
 
         metrics, conf_matrix = compute_metrics(all_labels, all_preds, config["data"]["classes"])
         test_acc = metrics["accuracy"]
@@ -181,7 +202,6 @@ def train(config):
             best_acc = test_acc
 
         # 日志输出 (控制台 + 文件)
-        best_mark = " (new best)" if is_best else ""
         log_line = (
             f"[Epoch {epoch:03d}/{train_cfg['epochs']:03d}] "
             f"train_loss={train_loss:.4f} "
@@ -189,8 +209,15 @@ def train(config):
             f"test_loss={test_loss:.4f} "
             f"test_acc={test_acc:.2f} "
             f"macro_f1={macro_f1:.2f} "
-            f"best_acc={best_acc:.2f}{best_mark}"
+            f"best_acc={best_acc:.2f}"
         )
+        if extra:
+            log_line += (
+                f" glb_norm={extra['global_logits_norm']:.4f}"
+                f" evd_norm={extra['evidence_logits_norm']:.4f}"
+            )
+        best_mark = " (new best)" if is_best else ""
+        log_line += best_mark
         logger.log(log_line)
 
         # 记录指标
@@ -205,6 +232,8 @@ def train(config):
         }
         for cls_name in config["data"]["classes"]:
             record[f"recall_{cls_name}"] = round(metrics[f"recall_{cls_name}"], 2)
+        for k, v in extra.items():
+            record[k] = round(v, 4)
         metrics_records.append(record)
 
         # 保存 checkpoint
@@ -231,10 +260,50 @@ def train(config):
         conf_matrix, config["data"]["classes"],
         os.path.join(run_dir, "confusion_matrix.png"),
     )
-    import numpy as np
     np.save(os.path.join(run_dir, "confusion_matrix.npy"), conf_matrix)
+
+    # CAEM: 保存 evidence map 可视化
+    if hasattr(model, "class_queries"):
+        save_evidence_maps(
+            model, test_loader, device, run_dir, config["data"]["classes"],
+        )
 
     logger.log(f"\nTraining finished. Best test_acc: {best_acc:.2f}")
     logger.close()
 
     return run_dir, best_acc
+
+
+@torch.no_grad()
+def save_evidence_maps(model, dataloader, device, run_dir, class_names):
+    """保存前 5 个 test 样本的 evidence map 可视化 (6-class heatmap)。"""
+    save_dir = os.path.join(run_dir, "evidence_maps")
+    os.makedirs(save_dir, exist_ok=True)
+
+    model.eval()
+    images, labels = next(iter(dataloader))
+    images = images[:5].to(device)
+    labels = labels[:5]
+
+    logits, evidence_maps, _, _ = model(images, return_evidence_maps=True)
+    evidence_maps = evidence_maps.cpu().numpy()  # [B, C, 196]
+
+    for i in range(len(images)):
+        predicted = logits[i].argmax().item()
+        fig, axes = plt.subplots(2, 3, figsize=(12, 8))
+        fig.suptitle(
+            f"Sample {i} | True: {class_names[labels[i]]}"
+            f" | Pred: {class_names[predicted]}"
+        )
+        for c in range(len(class_names)):
+            ax = axes[c // 3, c % 3]
+            im = ax.imshow(evidence_maps[i, c].reshape(14, 14), cmap="hot")
+            ax.set_title(class_names[c])
+            ax.axis("off")
+            plt.colorbar(im, ax=ax)
+        plt.tight_layout()
+        plt.savefig(os.path.join(save_dir, f"sample_{i:02d}.png"), dpi=100)
+        plt.close()
+
+    # 同时保存 raw evidence maps
+    np.save(os.path.join(save_dir, "evidence_maps.npy"), evidence_maps)
